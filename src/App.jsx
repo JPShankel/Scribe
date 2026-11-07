@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import Tree from './Tree.jsx'
+import SpellEditor from './SpellEditor.jsx'
+import { CharacterList, CharacterSheet } from './Characters.jsx'
+import Timeline from './Timeline.jsx'
+import { WORD_RE, getSpellChecker } from './spellcheck.js'
+import { exportPdf } from './exportPdf.js'
 import {
   ROOT_ID,
   addNode,
+  characterNames,
   countWords,
+  createCharacter,
   deleteNode,
   loadProject,
+  normalizeProject,
   moveNode,
   newId,
   saveProject,
@@ -17,10 +25,37 @@ export default function App() {
   const [project, setProject] = useState(loadProject)
   const [renamingId, setRenamingId] = useState(null)
   const [saveState, setSaveState] = useState('Saved')
+  const [spellOn, setSpellOn] = useState(() => {
+    try {
+      return localStorage.getItem('scribe.spellcheck') !== 'off'
+    } catch {
+      return true
+    }
+  })
   const editorRef = useRef(null)
 
-  const { nodes, selectedId, expanded } = project
+  const toggleSpell = (on) => {
+    setSpellOn(on)
+    try {
+      localStorage.setItem('scribe.spellcheck', on ? 'on' : 'off')
+    } catch {
+      // preference just won't persist
+    }
+  }
+
+  const { nodes, selectedId, expanded, characters, characterOrder, selectedCharacterId, timeline, showTimeline } =
+    project
   const selected = nodes[selectedId]
+  const character = !showTimeline && selectedCharacterId ? characters[selectedCharacterId] : null
+  const [charsOpen, setCharsOpen] = useState(true)
+
+  // Character names and aliases count as correctly spelled words.
+  useEffect(() => {
+    const words = Object.values(characters).flatMap((c) =>
+      characterNames(c).flatMap((n) => n.match(WORD_RE) ?? []),
+    )
+    getSpellChecker().setProjectWords(words)
+  }, [characters])
 
   // Autosave (debounced) to localStorage.
   useEffect(() => {
@@ -35,7 +70,47 @@ export default function App() {
     setProject((p) => ({ ...p, ...fn(p) }))
   }
 
-  const select = (id) => patch(() => ({ selectedId: id }))
+  const select = (id) => patch(() => ({ selectedId: id, selectedCharacterId: null, showTimeline: false }))
+  const openCharacter = (id) => patch(() => ({ selectedCharacterId: id, showTimeline: false }))
+  const openTimeline = (eventId) =>
+    patch((p) => ({
+      showTimeline: true,
+      timeline: eventId === undefined ? p.timeline : { ...p.timeline, selectedEventId: eventId },
+    }))
+  const updateTimeline = (fn) => patch((p) => ({ timeline: fn(p.timeline) }))
+
+  const addCharacter = () => {
+    const c = createCharacter('New character')
+    patch((p) => ({
+      characters: { ...p.characters, [c.id]: c },
+      characterOrder: [...p.characterOrder, c.id],
+      selectedCharacterId: c.id,
+      showTimeline: false,
+    }))
+    setCharsOpen(true)
+    // Put the cursor in the name field, ready to type over the placeholder name.
+    requestAnimationFrame(() => {
+      const el = document.querySelector('.editor-title')
+      el?.focus()
+      el?.select()
+    })
+  }
+
+  const updateCharacter = (id, fields) =>
+    patch((p) => ({ characters: { ...p.characters, [id]: { ...p.characters[id], ...fields } } }))
+
+  const deleteCharacter = (id) => {
+    if (!confirm(`Delete the character "${characters[id].name}"?`)) return
+    patch((p) => {
+      const rest = { ...p.characters }
+      delete rest[id]
+      return {
+        characters: rest,
+        characterOrder: p.characterOrder.filter((c) => c !== id),
+        selectedCharacterId: null,
+      }
+    })
+  }
   const toggle = (id) =>
     patch((p) => ({ expanded: { ...p.expanded, [id]: !p.expanded[id] } }))
 
@@ -55,6 +130,8 @@ export default function App() {
         nodes: addNode(p.nodes, parentId, node, afterId),
         expanded: { ...p.expanded, [parentId]: true },
         selectedId: id,
+        selectedCharacterId: null,
+        showTimeline: false,
       }
     })
     setRenamingId(id)
@@ -79,11 +156,23 @@ export default function App() {
     URL.revokeObjectURL(a.href)
   }
 
+  // The manuscript header needs the author's last name; ask once and keep it with the project.
+  const exportManuscript = () => {
+    let author = project.author ?? ''
+    if (!author.trim()) {
+      const answer = prompt('Author name (its last name goes in the page header):', '')
+      if (answer === null) return
+      author = answer.trim()
+      if (author) patch(() => ({ author }))
+    }
+    exportPdf(nodes, author)
+  }
+
   const importProject = (file) => {
     file.text().then((text) => {
       try {
-        const data = JSON.parse(text)
-        if (!data?.nodes?.[ROOT_ID]) throw new Error('not a Scribe project')
+        const data = normalizeProject(JSON.parse(text))
+        if (!data) throw new Error('not a Scribe project')
         if (confirm('Replace the current project with the imported one?')) setProject(data)
       } catch (err) {
         alert(`Could not import: ${err.message}`)
@@ -104,7 +193,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <aside className="sidebar" tabIndex={-1} onKeyDown={onSidebarKey}>
+      <aside className="sidebar">
         <div className="sidebar-toolbar">
           <button onClick={() => create('page')} title="New page">+ Page</button>
           <button onClick={() => create('folder')} title="New folder">+ Folder</button>
@@ -115,10 +204,10 @@ export default function App() {
             Delete
           </button>
         </div>
-        <div className="sidebar-tree">
+        <div className="sidebar-tree" tabIndex={-1} onKeyDown={onSidebarKey}>
           <Tree
             nodes={nodes}
-            selectedId={selectedId}
+            selectedId={character || showTimeline ? null : selectedId}
             expanded={expanded}
             renamingId={renamingId}
             setRenamingId={setRenamingId}
@@ -133,9 +222,33 @@ export default function App() {
             }
           />
         </div>
+        <section className="sidebar-section">
+          <button
+            className={`sidebar-link${showTimeline ? ' selected' : ''}`}
+            onClick={() => openTimeline()}
+          >
+            <span aria-hidden="true">🕒</span>
+            <span className="sidebar-link-label">Timeline</span>
+            <span className="section-count">
+              {timeline.order.length} event{timeline.order.length === 1 ? '' : 's'}
+            </span>
+          </button>
+        </section>
+        <CharacterList
+          characters={characters}
+          order={characterOrder}
+          selectedId={character ? selectedCharacterId : null}
+          open={charsOpen}
+          onToggleOpen={() => setCharsOpen((o) => !o)}
+          onSelect={openCharacter}
+          onAdd={addCharacter}
+        />
         <div className="sidebar-footer">
           <span>{totalWords.toLocaleString()} words total</span>
           <span className="sidebar-io">
+            <button onClick={exportManuscript} title="Print the manuscript or save it as a PDF">
+              PDF
+            </button>
             <button onClick={exportProject} title="Download project as JSON">Export</button>
             <label className="button" title="Load project from JSON">
               Import
@@ -154,7 +267,32 @@ export default function App() {
       </aside>
 
       <main className="editor-pane">
-        {selected?.type === 'page' ? (
+        {showTimeline ? (
+          <Timeline
+            timeline={timeline}
+            nodes={nodes}
+            characters={characters}
+            characterOrder={characterOrder}
+            saveState={saveState}
+            onChange={updateTimeline}
+            onOpenPage={select}
+            onOpenCharacter={openCharacter}
+          />
+        ) : character ? (
+          <CharacterSheet
+            key={character.id}
+            character={character}
+            nodes={nodes}
+            events={timeline.order
+              .map((id, index) => ({ ev: timeline.events[id], index }))
+              .filter(({ ev }) => ev.characterIds.includes(character.id))}
+            onOpenEvent={openTimeline}
+            saveState={saveState}
+            onChange={(fields) => updateCharacter(character.id, fields)}
+            onDelete={() => deleteCharacter(character.id)}
+            onOpenPage={select}
+          />
+        ) : selected?.type === 'page' ? (
           <>
             <header className="editor-header">
               <input
@@ -166,21 +304,24 @@ export default function App() {
                 onKeyDown={(e) => e.key === 'Enter' && editorRef.current?.focus()}
                 aria-label="Page title"
               />
+              <label className="editor-toggle" title="Underline misspelled words; right-click one for suggestions">
+                <input type="checkbox" checked={spellOn} onChange={(e) => toggleSpell(e.target.checked)} />
+                Spellcheck
+              </label>
               <span className="editor-status">
                 {countWords(selected.content).toLocaleString()} words · {saveState}
               </span>
             </header>
             <div className="editor-scroll">
-              <textarea
+              <SpellEditor
                 key={selectedId}
-                ref={editorRef}
-                className="editor"
+                inputRef={editorRef}
+                enabled={spellOn}
                 value={selected.content}
-                onChange={(e) =>
-                  patch((p) => ({ nodes: updateNode(p.nodes, selectedId, { content: e.target.value }) }))
+                onChange={(content) =>
+                  patch((p) => ({ nodes: updateNode(p.nodes, selectedId, { content }) }))
                 }
                 placeholder="Start writing…"
-                spellCheck
                 autoFocus
               />
             </div>
