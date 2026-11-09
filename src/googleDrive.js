@@ -7,7 +7,9 @@
 //
 // Needs an OAuth client ID in VITE_GOOGLE_CLIENT_ID (see .env.example).
 
-const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
+// Trimmed: values pasted into hosting dashboards often pick up a trailing newline,
+// which Google rejects as an unknown client.
+const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim()
 const SCOPE = 'https://www.googleapis.com/auth/drive.file'
 const API = 'https://www.googleapis.com/drive/v3/files'
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files'
