@@ -23,6 +23,9 @@ export function createInitialProject() {
     selectedCharacterId: null,
     timeline: createTimeline(),
     showTimeline: false,
+    resources: {},
+    resourceOrder: [],
+    selectedResourceId: null,
   }
 }
 
@@ -33,6 +36,7 @@ export function normalizeProject(data) {
   const tl = data.timeline ?? createTimeline()
   const plotlines = tl.plotlines?.length ? tl.plotlines : createTimeline().plotlines
   const events = tl.events ?? {}
+  const resources = data.resources ?? {}
   return {
     ...data,
     expanded: data.expanded ?? { [ROOT_ID]: true },
@@ -46,6 +50,9 @@ export function normalizeProject(data) {
       selectedEventId: events[tl.selectedEventId] ? tl.selectedEventId : null,
     },
     showTimeline: !!data.showTimeline,
+    resources,
+    resourceOrder: (data.resourceOrder ?? Object.keys(resources)).filter((id) => resources[id]),
+    selectedResourceId: resources[data.selectedResourceId] ? data.selectedResourceId : null,
   }
 }
 
@@ -126,6 +133,45 @@ export function findOutOfOrder(tl, nodes) {
   }
   return flagged
 }
+
+// ---------- Resources ----------
+// Webpages gathered for research: a link plus the writer's notes on it.
+
+/** Tidy a typed or pasted URL; bare domains get https://. Returns '' if empty. */
+export function normalizeUrl(raw) {
+  const url = raw.trim()
+  if (!url) return ''
+  // Has a scheme ("https:", "mailto:")? A host with a port ("localhost:3000",
+  // "example.com:8080") doesn't count.
+  return /^[a-z][a-z\d+-]*:(?!\d)/i.test(url) ? url : `https://${url}`
+}
+
+/** Only web links are opened, never javascript: and the like. */
+export const isWebUrl = (url) => /^https?:\/\//i.test(url)
+
+/** A readable fallback title from a URL: "example.com › some page". */
+export function titleFromUrl(url) {
+  try {
+    const u = new URL(url)
+    const host = u.hostname.replace(/^www\./, '')
+    if (!host) return url
+    const last = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() ?? '')
+      .replace(/\.[a-z]{2,5}$/i, '')
+      .replace(/[-_]+/g, ' ')
+      .trim()
+    return last ? `${host} › ${last}` : host
+  } catch {
+    return url
+  }
+}
+
+export const createResource = (url = '', title = '') => ({
+  id: newId(),
+  title: title.trim() || (url ? titleFromUrl(url) : 'New resource'),
+  url,
+  notes: '',
+  addedAt: new Date().toISOString(),
+})
 
 // ---------- Characters ----------
 

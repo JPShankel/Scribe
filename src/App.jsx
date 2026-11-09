@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import Tree from './Tree.jsx'
 import SpellEditor from './SpellEditor.jsx'
 import { CharacterList, CharacterSheet } from './Characters.jsx'
 import Timeline from './Timeline.jsx'
+import { ResourceList, ResourceSheet } from './Resources.jsx'
 import { WORD_RE, getSpellChecker } from './spellcheck.js'
 import { exportPdf } from './exportPdf.js'
 import {
@@ -11,6 +12,8 @@ import {
   characterNames,
   countWords,
   createCharacter,
+  createInitialProject,
+  createResource,
   deleteNode,
   loadProject,
   normalizeProject,
@@ -19,12 +22,37 @@ import {
   saveProject,
   updateNode,
 } from './store.js'
+import {
+  canWriteFiles,
+  loadFileHandle,
+  loadFileMeta,
+  openProjectFile,
+  saveFileMeta,
+  saveProjectFile,
+  storeFileHandle,
+} from './projectFile.js'
+import DriveDialog from './DriveDialog.jsx'
+import { driveConfigured, driveLoad, driveSave, loadGis } from './googleDrive.js'
+import { currentTheme, onSystemThemeChange, setTheme } from './theme.js'
 import './App.css'
+
+/** Whether the writing itself changed — not just which page is selected or open. */
+const contentChanged = (a, b) =>
+  ['nodes', 'characters', 'characterOrder', 'resources', 'resourceOrder', 'author'].some((k) => a[k] !== b[k]) ||
+  ['plotlines', 'events', 'order'].some((k) => a.timeline[k] !== b.timeline[k])
 
 export default function App() {
   const [project, setProject] = useState(loadProject)
   const [renamingId, setRenamingId] = useState(null)
-  const [saveState, setSaveState] = useState('Saved')
+  const [storageOk, setStorageOk] = useState(true)
+  // The project file on disk: its name, the handle used to write it, and the
+  // project as it was last saved/opened (null = changed since, as far as we know).
+  const [fileName, setFileName] = useState(() => loadFileMeta().name)
+  // Set when the project lives in Google Drive rather than on disk.
+  const [driveId, setDriveId] = useState(() => loadFileMeta().driveId)
+  const [driveOpen, setDriveOpen] = useState(false)
+  const [savedProject, setSavedProject] = useState(() => (loadFileMeta().dirty ? null : project))
+  const fileHandle = useRef(null)
   const [spellOn, setSpellOn] = useState(() => {
     try {
       return localStorage.getItem('scribe.spellcheck') !== 'off'
@@ -33,6 +61,13 @@ export default function App() {
     }
   })
   const editorRef = useRef(null)
+  const [theme, setThemeState] = useState(currentTheme)
+  useEffect(() => onSystemThemeChange(setThemeState), [])
+  const toggleTheme = () => {
+    const next = theme === 'dark' ? 'light' : 'dark'
+    setTheme(next)
+    setThemeState(next)
+  }
 
   const toggleSpell = (on) => {
     setSpellOn(on)
@@ -43,11 +78,24 @@ export default function App() {
     }
   }
 
-  const { nodes, selectedId, expanded, characters, characterOrder, selectedCharacterId, timeline, showTimeline } =
-    project
+  const {
+    nodes,
+    selectedId,
+    expanded,
+    characters,
+    characterOrder,
+    selectedCharacterId,
+    timeline,
+    showTimeline,
+    resources,
+    resourceOrder,
+    selectedResourceId,
+  } = project
   const selected = nodes[selectedId]
   const character = !showTimeline && selectedCharacterId ? characters[selectedCharacterId] : null
+  const resource = !showTimeline && !character && selectedResourceId ? resources[selectedResourceId] : null
   const [charsOpen, setCharsOpen] = useState(true)
+  const [resourcesOpen, setResourcesOpen] = useState(true)
 
   // Character names and aliases count as correctly spelled words.
   useEffect(() => {
@@ -57,21 +105,173 @@ export default function App() {
     getSpellChecker().setProjectWords(words)
   }, [characters])
 
-  // Autosave (debounced) to localStorage.
+  // Autosave a working copy (debounced) to localStorage, so nothing is lost
+  // between file saves.
   useEffect(() => {
-    const t = setTimeout(() => {
-      setSaveState(saveProject(project) ? 'Saved' : 'Save failed — storage full?')
-    }, 400)
+    const t = setTimeout(() => setStorageOk(saveProject(project)), 400)
     return () => clearTimeout(t)
   }, [project])
 
-  const patch = (fn) => {
-    setSaveState('Saving…')
-    setProject((p) => ({ ...p, ...fn(p) }))
+  const dirty = !savedProject || contentChanged(savedProject, project)
+  useEffect(() => saveFileMeta({ name: fileName, dirty, driveId }), [fileName, dirty, driveId])
+
+  // Load Google sign-in early so its popup opens straight from the click.
+  useEffect(() => {
+    if (driveConfigured) loadGis().catch(() => {})
+  }, [])
+
+  // Reconnect to the file we were editing before the reload.
+  useEffect(() => {
+    loadFileHandle().then((h) => {
+      if (h && h.name === loadFileMeta().name && !fileHandle.current) fileHandle.current = h
+    })
+  }, [])
+
+  const saveState = !storageOk
+    ? 'Browser storage full — save to a file!'
+    : !fileName
+      ? 'Not saved to a file'
+      : dirty
+        ? 'Unsaved changes'
+        : driveId
+          ? 'Saved to Drive'
+          : 'Saved'
+
+  const patch = (fn) => setProject((p) => ({ ...p, ...fn(p) }))
+
+  // ---------- Project files ----------
+
+  const setFile = (name, handle, snapshot, newDriveId = null) => {
+    setFileName(name)
+    setDriveId(newDriveId)
+    setSavedProject(snapshot)
+    fileHandle.current = handle
+    storeFileHandle(handle)
   }
 
-  const select = (id) => patch(() => ({ selectedId: id, selectedCharacterId: null, showTimeline: false }))
-  const openCharacter = (id) => patch(() => ({ selectedCharacterId: id, showTimeline: false }))
+  const confirmDiscard = () =>
+    !dirty || confirm('This project has unsaved changes. Discard them?')
+
+  const newProject = () => {
+    if (!confirmDiscard()) return
+    // Keep the author's name; it's who's writing, not what.
+    const p = { ...createInitialProject(), author: project.author }
+    setProject(p)
+    setFile(null, null, p)
+    setRenamingId(null)
+  }
+
+  const openProject = async () => {
+    if (!confirmDiscard()) return
+    try {
+      const file = await openProjectFile()
+      if (!file) return
+      const data = normalizeProject(JSON.parse(file.text))
+      if (!data) throw new Error('this is not a Scribe project file.')
+      setProject(data)
+      setFile(file.name, file.handle, data)
+      setRenamingId(null)
+    } catch (err) {
+      alert(`Could not open the project: ${err.message}`)
+    }
+  }
+
+  const suggestedName = () =>
+    fileName ?? `${project.nodes[ROOT_ID].name.replace(/[^\w -]+/g, '').trim() || 'novel'}.json`
+
+  /** Save wherever the project lives; Save As always goes to a file on disk. */
+  const saveToFile = async (saveAs = false) => {
+    if (driveId && !saveAs) return saveToDrive()
+    const snapshot = project
+    const suggested = suggestedName()
+    try {
+      const res = await saveProjectFile(snapshot, saveAs ? null : fileHandle.current, suggested)
+      if (res) setFile(res.name, res.handle, snapshot)
+    } catch (err) {
+      alert(`Could not save the project: ${err.message}`)
+    }
+  }
+
+  // ---------- Google Drive ----------
+
+  /** Update the project's Drive file, or create one if it isn't in Drive yet. */
+  const saveToDrive = async () => {
+    const snapshot = project
+    try {
+      const res = await driveSave(snapshot, driveId, suggestedName())
+      setFile(res.name, null, snapshot, res.id)
+    } catch (err) {
+      if (err.name !== 'AbortError') alert(`Could not save to Google Drive: ${err.message}`)
+    }
+  }
+
+  const openFromDrive = () => {
+    if (confirmDiscard()) setDriveOpen(true)
+  }
+
+  const pickDriveFile = async (file) => {
+    setDriveOpen(false)
+    try {
+      const data = normalizeProject(JSON.parse(await driveLoad(file.id)))
+      if (!data) throw new Error('this is not a Scribe project file.')
+      setProject(data)
+      setFile(file.name, null, data, file.id)
+      setRenamingId(null)
+    } catch (err) {
+      if (err.name !== 'AbortError') alert(`Could not open the project: ${err.message}`)
+    }
+  }
+
+  // Ctrl/Cmd+S save, Ctrl/Cmd+Shift+S save as, Ctrl/Cmd+O open.
+  const onKey = useEffectEvent((e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return
+    const key = e.key.toLowerCase()
+    if (key === 's') {
+      e.preventDefault()
+      saveToFile(e.shiftKey)
+    } else if (key === 'o' && !e.shiftKey) {
+      e.preventDefault()
+      openProject()
+    }
+  })
+  useEffect(() => {
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const select = (id) =>
+    patch(() => ({ selectedId: id, selectedCharacterId: null, selectedResourceId: null, showTimeline: false }))
+  const openCharacter = (id) => patch(() => ({ selectedCharacterId: id, selectedResourceId: null, showTimeline: false }))
+  const openResource = (id) => patch(() => ({ selectedResourceId: id, selectedCharacterId: null, showTimeline: false }))
+
+  /** Add webpages; opens the last one added. */
+  const addResources = (links) => {
+    const created = links.map(({ url, title }) => createResource(url, title))
+    patch((p) => ({
+      resources: { ...p.resources, ...Object.fromEntries(created.map((r) => [r.id, r])) },
+      resourceOrder: [...p.resourceOrder, ...created.map((r) => r.id)],
+      selectedResourceId: created.at(-1).id,
+      selectedCharacterId: null,
+      showTimeline: false,
+    }))
+    setResourcesOpen(true)
+  }
+
+  const updateResource = (id, fields) =>
+    patch((p) => ({ resources: { ...p.resources, [id]: { ...p.resources[id], ...fields } } }))
+
+  const deleteResource = (id) => {
+    if (!confirm(`Delete the resource "${resources[id].title}"?`)) return
+    patch((p) => {
+      const rest = { ...p.resources }
+      delete rest[id]
+      return {
+        resources: rest,
+        resourceOrder: p.resourceOrder.filter((r) => r !== id),
+        selectedResourceId: null,
+      }
+    })
+  }
   const openTimeline = (eventId) =>
     patch((p) => ({
       showTimeline: true,
@@ -85,6 +285,7 @@ export default function App() {
       characters: { ...p.characters, [c.id]: c },
       characterOrder: [...p.characterOrder, c.id],
       selectedCharacterId: c.id,
+      selectedResourceId: null,
       showTimeline: false,
     }))
     setCharsOpen(true)
@@ -131,6 +332,7 @@ export default function App() {
         expanded: { ...p.expanded, [parentId]: true },
         selectedId: id,
         selectedCharacterId: null,
+        selectedResourceId: null,
         showTimeline: false,
       }
     })
@@ -147,15 +349,6 @@ export default function App() {
     }))
   }
 
-  const exportProject = () => {
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `${nodes[ROOT_ID].name.replace(/[^\w -]+/g, '') || 'novel'}.json`
-    a.click()
-    URL.revokeObjectURL(a.href)
-  }
-
   // The manuscript header needs the author's last name; ask once and keep it with the project.
   const exportManuscript = () => {
     let author = project.author ?? ''
@@ -166,18 +359,6 @@ export default function App() {
       if (author) patch(() => ({ author }))
     }
     exportPdf(nodes, author)
-  }
-
-  const importProject = (file) => {
-    file.text().then((text) => {
-      try {
-        const data = normalizeProject(JSON.parse(text))
-        if (!data) throw new Error('not a Scribe project')
-        if (confirm('Replace the current project with the imported one?')) setProject(data)
-      } catch (err) {
-        alert(`Could not import: ${err.message}`)
-      }
-    })
   }
 
   // Keyboard shortcuts in the tree: F2 rename, Delete remove.
@@ -194,6 +375,54 @@ export default function App() {
   return (
     <div className="app">
       <aside className="sidebar">
+        <div className="project-bar">
+          <span
+            className="project-file"
+            title={
+              fileName
+                ? `${fileName}${driveId ? ' (Google Drive)' : ''}${dirty ? ' — unsaved changes' : ''}`
+                : 'Not saved to a file yet'
+            }
+          >
+            {driveId && <span aria-label="In Google Drive">☁ </span>}
+            {fileName ?? 'Untitled project'}
+            {dirty && <span className="project-dirty" aria-label="unsaved changes"> ●</span>}
+          </span>
+          <span className="project-actions">
+            <button onClick={newProject} title="Start a new, empty project">New</button>
+            <button onClick={openProject} title="Open a project file (Ctrl+O)">Open…</button>
+            <button
+              onClick={() => saveToFile(false)}
+              title={
+                driveId
+                  ? 'Save to Google Drive (Ctrl+S)'
+                  : canWriteFiles
+                    ? 'Save to the project file (Ctrl+S)'
+                    : 'Download the project file (Ctrl+S)'
+              }
+            >
+              Save
+            </button>
+            {canWriteFiles && (
+              <button onClick={() => saveToFile(true)} title="Save to a new file on this computer (Ctrl+Shift+S)">
+                Save As…
+              </button>
+            )}
+            {driveConfigured && (
+              <>
+                <button onClick={openFromDrive} title="Open a project saved in Google Drive">
+                  Open from Drive…
+                </button>
+                <button
+                  onClick={saveToDrive}
+                  title={driveId ? 'Save to this project’s Google Drive file' : 'Save a copy to Google Drive and keep saving there'}
+                >
+                  Save to Drive
+                </button>
+              </>
+            )}
+          </span>
+        </div>
         <div className="sidebar-toolbar">
           <button onClick={() => create('page')} title="New page">+ Page</button>
           <button onClick={() => create('folder')} title="New folder">+ Folder</button>
@@ -207,7 +436,7 @@ export default function App() {
         <div className="sidebar-tree" tabIndex={-1} onKeyDown={onSidebarKey}>
           <Tree
             nodes={nodes}
-            selectedId={character || showTimeline ? null : selectedId}
+            selectedId={character || resource || showTimeline ? null : selectedId}
             expanded={expanded}
             renamingId={renamingId}
             setRenamingId={setRenamingId}
@@ -243,25 +472,29 @@ export default function App() {
           onSelect={openCharacter}
           onAdd={addCharacter}
         />
+        <ResourceList
+          resources={resources}
+          order={resourceOrder}
+          selectedId={resource ? selectedResourceId : null}
+          open={resourcesOpen}
+          onToggleOpen={() => setResourcesOpen((o) => !o)}
+          onSelect={openResource}
+          onAdd={() => addResources([{ url: '', title: '' }])}
+          onAddLinks={addResources}
+        />
         <div className="sidebar-footer">
           <span>{totalWords.toLocaleString()} words total</span>
           <span className="sidebar-io">
+            <button
+              onClick={toggleTheme}
+              title={theme === 'dark' ? 'Switch to light view' : 'Switch to dark view'}
+              aria-label={theme === 'dark' ? 'Switch to light view' : 'Switch to dark view'}
+            >
+              {theme === 'dark' ? '☀ Light' : '☾ Dark'}
+            </button>
             <button onClick={exportManuscript} title="Print the manuscript or save it as a PDF">
               PDF
             </button>
-            <button onClick={exportProject} title="Download project as JSON">Export</button>
-            <label className="button" title="Load project from JSON">
-              Import
-              <input
-                type="file"
-                accept="application/json,.json"
-                hidden
-                onChange={(e) => {
-                  if (e.target.files[0]) importProject(e.target.files[0])
-                  e.target.value = ''
-                }}
-              />
-            </label>
           </span>
         </div>
       </aside>
@@ -291,6 +524,14 @@ export default function App() {
             onChange={(fields) => updateCharacter(character.id, fields)}
             onDelete={() => deleteCharacter(character.id)}
             onOpenPage={select}
+          />
+        ) : resource ? (
+          <ResourceSheet
+            key={resource.id}
+            resource={resource}
+            saveState={saveState}
+            onChange={(fields) => updateResource(resource.id, fields)}
+            onDelete={() => deleteResource(resource.id)}
           />
         ) : selected?.type === 'page' ? (
           <>
@@ -333,6 +574,7 @@ export default function App() {
           </div>
         )}
       </main>
+      {driveOpen && <DriveDialog onPick={pickDriveFile} onClose={() => setDriveOpen(false)} />}
     </div>
   )
 }
