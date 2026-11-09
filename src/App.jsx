@@ -201,7 +201,7 @@ export default function App() {
       const res = await driveSave(snapshot, driveId, suggestedName())
       setFile(res.name, null, snapshot, res.id)
     } catch (err) {
-      if (err.name !== 'AbortError') alert(`Could not save to Google Drive: ${err.message}`)
+      alert(`Could not save to Google Drive: ${err.message}`)
     }
   }
 

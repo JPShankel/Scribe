@@ -37,7 +37,21 @@ let token = null
 let expiresAt = 0
 let client = null
 
-const cancelled = () => Object.assign(new Error('Sign-in was cancelled.'), { name: 'AbortError' })
+/** Turn a Google sign-in failure into something the user can act on. */
+function signInError(type, detail) {
+  const origin = window.location.origin
+  const messages = {
+    popup_failed_to_open: 'Your browser blocked the Google sign-in window. Allow pop-ups for this site, then try again.',
+    popup_closed:
+      'The Google sign-in window closed before sign-in finished. If Google showed an error there, the usual causes are: ' +
+      `${origin} isn’t listed under “Authorised JavaScript origins” for the OAuth client (changes can take a few minutes to apply); ` +
+      'your Google account isn’t a test user on the OAuth consent screen; or the Google Drive API isn’t enabled.',
+    access_denied: 'Google sign-in was declined, so Scribe can’t reach your Drive.',
+  }
+  const err = new Error(messages[type] ?? `Google sign-in failed: ${detail || type}.`)
+  err.code = type
+  return err
+}
 
 let pending = null
 
@@ -56,13 +70,12 @@ async function requestToken() {
   return new Promise((resolve, reject) => {
     client ??= window.google.accounts.oauth2.initTokenClient({ client_id: CLIENT_ID, scope: SCOPE, callback: () => {} })
     client.callback = (resp) => {
-      if (resp.error) return reject(new Error(resp.error_description || resp.error))
+      if (resp.error) return reject(signInError(resp.error, resp.error_description))
       token = resp.access_token
       expiresAt = Date.now() + resp.expires_in * 1000
       resolve(token)
     }
-    client.error_callback = (err) =>
-      reject(err.type === 'popup_closed' ? cancelled() : new Error(err.message || `Sign-in failed (${err.type}).`))
+    client.error_callback = (err) => reject(signInError(err.type, err.message))
     client.requestAccessToken()
   })
 }

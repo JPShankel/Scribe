@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { driveList } from './googleDrive.js'
 
 /** Modal listing the Scribe projects in Google Drive. */
@@ -6,20 +6,27 @@ export default function DriveDialog({ onPick, onClose }) {
   const ref = useRef(null)
   const [files, setFiles] = useState(null)
   const [error, setError] = useState('')
-  const cancel = useEffectEvent(() => onClose())
+  const live = useRef(true)
+
+  // Errors stay on screen (with Try again) rather than closing the dialog,
+  // so a failed sign-in is never silent.
+  const fetchFiles = () =>
+    driveList()
+      .then((f) => live.current && setFiles(f))
+      .catch((err) => live.current && setError(err.message))
+
+  const retry = () => {
+    setError('')
+    setFiles(null)
+    fetchFiles()
+  }
 
   useEffect(() => {
+    live.current = true
     if (!ref.current.open) ref.current.showModal()
-    const req = { live: true }
-    driveList()
-      .then((f) => req.live && setFiles(f))
-      .catch((err) => {
-        if (!req.live) return
-        if (err.name === 'AbortError') cancel()
-        else setError(err.message)
-      })
+    fetchFiles()
     return () => {
-      req.live = false
+      live.current = false
     }
   }, [])
 
@@ -50,6 +57,7 @@ export default function DriveDialog({ onPick, onClose }) {
         Only projects saved from Scribe are listed. Scribe can’t see anything else in your Drive.
       </p>
       <div className="drive-actions">
+        {error && <button onClick={retry}>Try again</button>}
         <button onClick={onClose}>Cancel</button>
       </div>
     </dialog>

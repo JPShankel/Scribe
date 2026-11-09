@@ -1025,3 +1025,7 @@ a.button {
   justify-content: flex-end;
   margin-top: 12px;
 }
+
+.drive-actions {
+  gap: 6px;
+}
