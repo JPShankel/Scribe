@@ -55,20 +55,40 @@ function signInError(type, detail) {
   return err
 }
 
+const hasToken = () => !!token && Date.now() < expiresAt - 60_000
+export const isSignedIn = hasToken
+
 let pending = null
 
-/** An access token, signing in with a popup if needed. Call from a click or keypress. */
-function getToken() {
-  if (token && Date.now() < expiresAt - 60_000) return Promise.resolve(token)
-  // Concurrent callers share one sign-in popup.
-  pending ??= requestToken().finally(() => {
-    pending = null
-  })
-  return pending
+/**
+ * Start Google sign-in now. Browsers only allow the sign-in popup when it is
+ * opened directly inside a click or keypress (Safari and Firefox are strict),
+ * so call this synchronously from the event handler, before any await.
+ * Each call starts a fresh attempt, so a popup that was blocked or abandoned
+ * never leaves later clicks stuck.
+ */
+export function signIn() {
+  if (hasToken()) return Promise.resolve(token)
+  pending = window.google?.accounts?.oauth2
+    ? requestTokenNow()
+    : loadGis().then(requestTokenNow) // not loaded yet: the popup may be blocked, but the retry will work
+  const current = pending
+  current
+    .finally(() => {
+      if (pending === current) pending = null
+    })
+    .catch(() => {})
+  return current
 }
 
-async function requestToken() {
-  await loadGis()
+/** An access token: the current one, the sign-in in progress, or a new sign-in. */
+function getToken() {
+  if (hasToken()) return Promise.resolve(token)
+  return pending ?? signIn()
+}
+
+/** Open Google's popup synchronously (the Promise executor runs immediately). */
+function requestTokenNow() {
   return new Promise((resolve, reject) => {
     client ??= window.google.accounts.oauth2.initTokenClient({ client_id: CLIENT_ID, scope: SCOPE, callback: () => {} })
     client.callback = (resp) => {

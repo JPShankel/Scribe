@@ -32,7 +32,7 @@ import {
   storeFileHandle,
 } from './projectFile.js'
 import DriveDialog from './DriveDialog.jsx'
-import { driveConfigured, driveLoad, driveSave, loadGis } from './googleDrive.js'
+import { driveConfigured, driveLoad, driveSave, loadGis, signIn } from './googleDrive.js'
 import { currentTheme, onSystemThemeChange, setTheme } from './theme.js'
 import './App.css'
 
@@ -197,6 +197,8 @@ export default function App() {
   /** Update the project's Drive file, or create one if it isn't in Drive yet. */
   const saveToDrive = async () => {
     const snapshot = project
+    // Open Google's sign-in popup (if needed) right here in the click, before any await.
+    signIn().catch(() => {}) // failures are reported by driveSave below
     try {
       const res = await driveSave(snapshot, driveId, suggestedName())
       setFile(res.name, null, snapshot, res.id)

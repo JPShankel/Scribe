@@ -1029,3 +1029,10 @@ a.button {
 .drive-actions {
   gap: 6px;
 }
+
+.drive-signin {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}

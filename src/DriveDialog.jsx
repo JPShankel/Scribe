@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { driveList } from './googleDrive.js'
+import { driveList, isSignedIn, signIn } from './googleDrive.js'
 
 /** Modal listing the Scribe projects in Google Drive. */
 export default function DriveDialog({ onPick, onClose }) {
   const ref = useRef(null)
   const [files, setFiles] = useState(null)
   const [error, setError] = useState('')
+  // Signing in needs its own click: browsers block the Google popup otherwise.
+  const [needsSignIn, setNeedsSignIn] = useState(() => !isSignedIn())
   const live = useRef(true)
 
   // Errors stay on screen (with Try again) rather than closing the dialog,
@@ -15,7 +17,10 @@ export default function DriveDialog({ onPick, onClose }) {
       .then((f) => live.current && setFiles(f))
       .catch((err) => live.current && setError(err.message))
 
-  const retry = () => {
+  /** From a click: sign in (if needed) right away, then list the files. */
+  const start = () => {
+    signIn().catch(() => {}) // failures surface through driveList
+    setNeedsSignIn(false)
     setError('')
     setFiles(null)
     fetchFiles()
@@ -24,7 +29,7 @@ export default function DriveDialog({ onPick, onClose }) {
   useEffect(() => {
     live.current = true
     if (!ref.current.open) ref.current.showModal()
-    fetchFiles()
+    if (isSignedIn()) fetchFiles()
     return () => {
       live.current = false
     }
@@ -33,7 +38,14 @@ export default function DriveDialog({ onPick, onClose }) {
   return (
     <dialog ref={ref} className="drive-dialog" onClose={onClose} onCancel={onClose}>
       <h2>Open from Google Drive</h2>
-      {error ? (
+      {needsSignIn ? (
+        <div className="drive-signin">
+          <p className="sheet-muted">Sign in to see the Scribe projects in your Google Drive.</p>
+          <button onClick={start} autoFocus>
+            Sign in with Google
+          </button>
+        </div>
+      ) : error ? (
         <p className="drive-error">{error}</p>
       ) : !files ? (
         <p className="sheet-muted">Loading your projects…</p>
@@ -57,7 +69,7 @@ export default function DriveDialog({ onPick, onClose }) {
         Only projects saved from Scribe are listed. Scribe can’t see anything else in your Drive.
       </p>
       <div className="drive-actions">
-        {error && <button onClick={retry}>Try again</button>}
+        {error && <button onClick={start}>Try again</button>}
         <button onClick={onClose}>Cancel</button>
       </div>
     </dialog>
