@@ -29,10 +29,23 @@ export function createInitialProject() {
   }
 }
 
+/** Older projects had an Age field; carry it into Lifespan so nothing is lost. */
+function migrateCharacters(characters) {
+  if (!Object.values(characters).some((c) => 'age' in c)) return characters
+  return Object.fromEntries(
+    Object.entries(characters).map(([id, c]) => {
+      if (!('age' in c)) return [id, c]
+      const { age, ...rest } = c
+      const lifespan = rest.lifespan || (age?.trim() ? `Age ${age.trim()}` : '')
+      return [id, { ...rest, lifespan }]
+    }),
+  )
+}
+
 /** Fill in fields added in later versions so older saves/imports still load. */
 export function normalizeProject(data) {
   if (!data?.nodes?.[ROOT_ID]) return null
-  const characters = data.characters ?? {}
+  const characters = migrateCharacters(data.characters ?? {})
   const tl = data.timeline ?? createTimeline()
   const plotlines = tl.plotlines?.length ? tl.plotlines : createTimeline().plotlines
   const events = tl.events ?? {}
@@ -178,7 +191,7 @@ export const createResource = (url = '', title = '') => ({
 export const CHARACTER_FIELDS = [
   { key: 'aliases', label: 'Also known as', hint: 'Nicknames, titles, surnames — comma separated', short: true },
   { key: 'role', label: 'Role', short: true, options: ['Protagonist', 'Antagonist', 'Deuteragonist', 'Supporting', 'Love interest', 'Mentor', 'Minor'] },
-  { key: 'age', label: 'Age', short: true },
+  { key: 'lifespan', label: 'Lifespan', hint: 'e.g. 1820 – 1885, or born 1990', short: true },
   { key: 'appearance', label: 'Appearance' },
   { key: 'personality', label: 'Personality' },
   { key: 'backstory', label: 'Backstory' },
