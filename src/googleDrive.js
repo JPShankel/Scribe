@@ -49,6 +49,9 @@ function signInError(type, detail) {
       `${origin} isn’t listed under “Authorised JavaScript origins” for the OAuth client (changes can take a few minutes to apply); ` +
       'your Google account isn’t a test user on the OAuth consent screen; or the Google Drive API isn’t enabled.',
     access_denied: 'Google sign-in was declined, so Scribe can’t reach your Drive.',
+    scope_not_granted:
+      'You signed in, but didn’t allow Scribe to use Google Drive. Try again, and on Google’s consent screen tick the box ' +
+      '“See, edit, create and delete only the specific Google Drive files that you use with this app”.',
   }
   const err = new Error(messages[type] ?? `Google sign-in failed: ${detail || type}.`)
   err.code = type
@@ -93,6 +96,8 @@ function requestTokenNow() {
     client ??= window.google.accounts.oauth2.initTokenClient({ client_id: CLIENT_ID, scope: SCOPE, callback: () => {} })
     client.callback = (resp) => {
       if (resp.error) return reject(signInError(resp.error, resp.error_description))
+      // Google's consent screen lets people untick individual permissions.
+      if (!window.google.accounts.oauth2.hasGrantedAllScopes(resp, SCOPE)) return reject(signInError('scope_not_granted'))
       token = resp.access_token
       expiresAt = Date.now() + resp.expires_in * 1000
       resolve(token)
@@ -113,7 +118,7 @@ async function api(url, options = {}, retry = true) {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => null)
-    const err = new Error(`Google Drive: ${body?.error?.message ?? res.statusText ?? res.status}`)
+    const err = new Error(`Google Drive said: ${body?.error?.message ?? res.statusText ?? res.status} (HTTP ${res.status})`)
     err.status = res.status
     throw err
   }
@@ -130,7 +135,7 @@ export async function driveSave(project, fileId, name) {
   const json = JSON.stringify(project, null, 2)
   if (fileId) {
     try {
-      const res = await api(`${UPLOAD}/${fileId}?uploadType=media&fields=id,name`, {
+      const res = await api(`${UPLOAD}/${fileId}?uploadType=media&fields=id,name,webViewLink`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: json,
@@ -146,12 +151,12 @@ export async function driveSave(project, fileId, name) {
   const body =
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
     `--${boundary}\r\nContent-Type: application/json\r\n\r\n${json}\r\n--${boundary}--`
-  const res = await api(`${UPLOAD}?uploadType=multipart&fields=id,name`, {
+  const res = await api(`${UPLOAD}?uploadType=multipart&fields=id,name,webViewLink`, {
     method: 'POST',
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
     body,
   })
-  return res.json()
+  return { ...(await res.json()), created: true }
 }
 
 /** Scribe projects in Drive, newest first: [{ id, name, modifiedTime }]. */

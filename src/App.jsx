@@ -202,6 +202,15 @@ export default function App() {
     try {
       const res = await driveSave(snapshot, driveId, suggestedName())
       setFile(res.name, null, snapshot, res.id)
+      // First save to Drive: say exactly where it went (and in which account).
+      if (res.created) {
+        const link = res.webViewLink ?? `https://drive.google.com/file/d/${res.id}/view`
+        if (confirm(`Saved “${res.name}” to the top level of My Drive in the Google account you just signed in with.
+
+Open it in Google Drive?`)) {
+          window.open(link, '_blank', 'noopener')
+        }
+      }
     } catch (err) {
       alert(`Could not save to Google Drive: ${err.message}`)
     }
